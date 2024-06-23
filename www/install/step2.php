@@ -1,7 +1,6 @@
 <?php
 require_once realpath(__DIR__ . DIRECTORY_SEPARATOR . 'install.php');
 
-
 use app\extensions\util\Versions;
 use nzedb\db\DB;
 use nzedb\db\DbUpdate;
@@ -21,69 +20,44 @@ if (!$cfg->isInitialized()) {
  * Check if the database exists.
  *
  * @param string $dbName The name of the database to be checked.
- * @param string $dbType mysql
+ * @param string $dbType The type of the database, e.g., 'mysql'.
  * @param PDO $pdo Class PDO instance.
  *
  * @return bool
  */
 function databaseCheck($dbName, $dbType, $pdo): bool
 {
-	// Return value.
-	$retVal = false;
-
-	// Prepare queries.
-	$stmt = ($dbType === 'mysql' ? 'SHOW DATABASES' : 'SELECT datname AS Database FROM pg_database');
+	$stmt = ($dbType === 'mysql') ? 'SHOW DATABASES' : 'SELECT datname AS Database FROM pg_database';
 	$stmt = $pdo->prepare($stmt);
 	$stmt->setFetchMode(PDO::FETCH_ASSOC);
+	if($stmt->execute()){
+		$tables = $stmt->fetchAll();
+	}else{
+		$tables = [];
+	}
 
-	// Run the query.
-	$stmt->execute();
-	$tables = $stmt->fetchAll();
-
-	// Store the query result as an array.
-	$tablearr = [];
 	foreach ($tables as $table) {
-		$tablearr[] = $table;
-	}
-
-	// Loop over the query result.
-	foreach ($tablearr as $tab) {
-
-		// Check if the database is found.
-		switch (true) {
-			case isset($tab['Database']);
-				$columnName = 'Database';
-				break;
-			case isset($tab['database']);
-				$columnName = 'database';
-				break;
-			default:
-				$columnName = '';
-		}
-
-		if (isset($columnName) && $tab[$columnName] === $dbName) {
-			$retVal = true;
+		if (isset($table['Database']) && $table['Database'] === $dbName) {
+			return true;
+		}else{
 			break;
+			return false;
 		}
 	}
 
-	return $retVal;
+	return false;
 }
 
 function copyFileToTmp(string $file)
 {
 	$fileTarget = '/tmp/' . pathinfo($file, PATHINFO_BASENAME);
-	if (\copy($file, $fileTarget)) // Copy to a directory accessible to all (for mysql user)
-	{
-		$file = $fileTarget;
-		\chmod($file, 0775);
+	if (\copy($file, $fileTarget)) {
+		\chmod($fileTarget, 0775);
+		return $fileTarget;
 	} else {
 		echo 'Failed to copy file: ' . $file . '</br>' . \PHP_EOL;
-		//throw new \Exception('Copying file to /tmp failed!');
-		$file = '';
+		return '';
 	}
-
-	return $file;
 }
 
 $cfg = $cfg->getSession();
@@ -91,7 +65,6 @@ $cfg = $cfg->getSession();
 if ($page->isPostBack()) {
 	$cfg->doCheck = true;
 
-	// Get the information the user typed into the website.
 	$cfg->DB_HOST = trim($_POST['host']);
 	$cfg->DB_PORT = trim($_POST['sql_port']);
 	$cfg->DB_SOCKET = trim($_POST['sql_socket']);
@@ -102,156 +75,113 @@ if ($page->isPostBack()) {
 	$cfg->error = false;
 
 	$validTypes = ['mysql'];
-	// Check if user selected a valid DB type.
 	if (!in_array($cfg->DB_SYSTEM, $validTypes, false)) {
-		$cfg->emessage = 'Invalid database system. Must be one of: [' . implode(', ', $validTypes) .
-			']; Not: ' . $cfg->DB_SYSTEM;
+		$cfg->emessage = 'Invalid database system. Must be one of: [' . implode(', ', $validTypes) . ']; Not: ' . $cfg->DB_SYSTEM;
 		$cfg->error = true;
 	} else {
-		// Connect to the SQL server.
 		try {
-			// HAS to be DB because settings table does not exist yet.
-			$pdo = new DB(
-				[
-					'checkVersion' => true,
-					'createDb'     => true,
-					'dbhost'       => $cfg->DB_HOST,
-					'dbname'       => $cfg->DB_NAME,
-					'dbpass'       => $cfg->DB_PASSWORD,
-					'dbport'       => $cfg->DB_PORT,
-					'dbsock'       => $cfg->DB_SOCKET,
-					'dbtype'       => $cfg->DB_SYSTEM,
-					'dbuser'       => $cfg->DB_USER,
-				]
-			);
+			$pdo = new DB([
+				'checkVersion' => true,
+				'createDb'     => true,
+				'dbhost'       => $cfg->DB_HOST,
+				'dbname'       => $cfg->DB_NAME,
+				'dbpass'       => $cfg->DB_PASSWORD,
+				'dbport'       => $cfg->DB_PORT,
+				'dbsock'       => $cfg->DB_SOCKET,
+				'dbtype'       => $cfg->DB_SYSTEM,
+				'dbuser'       => $cfg->DB_USER,
+			]);
 			$cfg->dbConnCheck = true;
 		} catch (\PDOException $e) {
 			$cfg->emessage = "Unable to connect to the SQL server.\n" . $e->getMessage();
 			$cfg->error = true;
 			$cfg->dbConnCheck = false;
 		} catch (\RuntimeException $e) {
-			switch ($e->getCode()) {
-				case 1:
-				case 2:
-				case 3:
-				case 4:
-				case 5:
-					$cfg->error    = true;
-					$cfg->emessage = $e->getMessage();
-					trigger_error($e->getMessage(), E_USER_WARNING);
-					break;
-				default:
-					var_dump($e);
-					throw new \RuntimeException($e->getMessage(), $e->getCode(), $e);
-			}
+			$cfg->error = true;
+			$cfg->emessage = $e->getMessage();
+			trigger_error($e->getMessage(), E_USER_WARNING);
 		}
 
-		// Check if the MySQL version is correct.
-		$goodVersion = false;
 		if (!$cfg->error) {
 			try {
-				$goodVersion = $pdo->isVendorVersionValid();
-			} catch (\PDOException $e) {
-				$goodVersion   = false;
-				$cfg->error    = true;
-				$cfg->emessage = 'Could not get version from SQL server.';
-			}
-
-			if ($goodVersion === false) {
-				$cfg->error = true;
-				$vendor = $pdo->getVendor();
-				switch (strtolower($vendor)) {
-					case 'mariadb':
-						$version = DB::MINIMUM_VERSION_MARIADB;
-						break;
-					default:
-						$version = DB::MINIMUM_VERSION_MYSQL;
+				if (!$pdo->isVendorVersionValid()) {
+					$cfg->error = true;
+					$vendor = $pdo->getVendor();
+					$version = ($vendor === 'mariadb') ? DB::MINIMUM_VERSION_MARIADB : DB::MINIMUM_VERSION_MYSQL;
+					$cfg->emessage = 'You are using an unsupported version of the ' . $vendor . ' server, the minimum allowed version is ' . $version;
 				}
-				$cfg->emessage = 'You are using an unsupported version of the ' . $vendor .
-					' server, the minimum allowed version is ' . $version;
+			} catch (\PDOException $e) {
+				$cfg->error = true;
+				$cfg->emessage = 'Could not get version from SQL server.';
 			}
 		}
 	}
 
-	// Start inserting data into the DB.
 	if (!$cfg->error) {
 		$cfg->setSession();
 
-		$DbSetup = new DbUpdate(
-			[
-				'backup' => false,
-				'db'     => $pdo,
-			]
-		);
+		$DbSetup = new DbUpdate(['backup' => false, 'db' => $pdo]);
 
 		try {
 			$file = copyFileToTmp(nZEDb_RES . 'db' . DS . 'schema' . DS . 'mysql-ddl.sql');
-			$DbSetup->sourceSQL(
-				[
-					'file' => $file,
-					'host' => $cfg->DB_HOST,
-					'name' => $cfg->DB_NAME,
-					'pass' => $cfg->DB_PASSWORD,
-					'user' => $cfg->DB_USER,
-				]
-			);
-			//$DbSetup->processSQLFile(); // Setup default schema
+			$DbSetup->sourceSQL([
+				'file' => $file,
+				'host' => $cfg->DB_HOST,
+				'name' => $cfg->DB_NAME,
+				'pass' => $cfg->DB_PASSWORD,
+				'user' => $cfg->DB_USER,
+			]);
+
 			$file = copyFileToTmp(nZEDb_RES . 'db' . DS . 'schema' . DS . 'mysql-data.sql');
-			$DbSetup->processSQLFile( // Process any custom stuff.
-				[
-					'filepath' => $file
-				]
-			);
-			$DbSetup->loadTables(); // Load default data files
+			$DbSetup->processSQLFile(['filepath' => $file]);
+			$DbSetup->loadTables();
 		} catch (\PDOException $err) {
 			$cfg->error = true;
 			$cfg->emessage = 'Error inserting: (' . $err->getMessage() . ')';
 		}
 
 		if (!$cfg->error) {
-			// Check one of the standard tables was created and has data.
-			$dbInstallWorked = false;
 			$reschk = $pdo->query('SELECT COUNT(id) AS num FROM tmux');
 			if ($reschk === false) {
 				$cfg->dbCreateCheck = false;
 				$cfg->error = true;
 				$cfg->emessage = 'Could not select data from your database, check that tables and data are properly created/inserted.';
 			} else {
+				$dbInstallWorked = false;
 				foreach ($reschk as $row) {
 					if ($row['num'] > 0) {
 						$dbInstallWorked = true;
 						break;
 					}
 				}
-			}
 
-			$ver = new Versions();
-			$patch = $ver->getSQLPatchFromFile();
+				if ($dbInstallWorked) {
+					$ver = new Versions();
+					$patch = $ver->getSQLPatchFromFile();
 
-			if ($dbInstallWorked) {
-				if ($patch > 0) {
-					$updateSettings = $pdo->exec(
-						"UPDATE settings SET value = '$patch' WHERE section = '' AND subsection = '' AND name = 'sqlpatch'"
-					);
-				} else {
-					$updateSettings = false;
-				}
-
-				// If it all worked, move to the next page.
-				if ($updateSettings) {
-					header("Location: ?success");
-					if (file_exists($cfg->DB_DIR . '/post_install.php')) {
-						exec("php " . $cfg->DB_DIR . "/post_install.php ${pdo}");
+					if ($patch > 0) {
+						$updateSettings = $pdo->exec(
+							"UPDATE settings SET value = '$patch' WHERE section = '' AND subsection = '' AND name = 'sqlpatch'"
+						);
+					} else {
+						$updateSettings = false;
 					}
-					exit();
+
+					if ($updateSettings) {
+						header("Location: ?success");
+						if (file_exists($cfg->DB_DIR . '/post_install.php')) {
+							exec("php " . $cfg->DB_DIR . "/post_install.php ${pdo}");
+						}
+						exit();
+					} else {
+						$cfg->error = true;
+						$cfg->emessage = "Could not update sqlpatch to '$patch' for your database.";
+					}
 				} else {
-					$cfg->error    = true;
-					$cfg->emessage = "Could not update sqlpatch to '$patch' for your database.";
+					$cfg->dbCreateCheck = false;
+					$cfg->error = true;
+					$cfg->emessage = 'Could not select data from your database.';
 				}
-			} else {
-				$cfg->dbCreateCheck = false;
-				$cfg->error         = true;
-				$cfg->emessage      = 'Could not select data from your database.';
 			}
 		}
 	}
@@ -261,3 +191,4 @@ $page->smarty->assign('cfg', $cfg);
 $page->smarty->assign('page', $page);
 $page->content = $page->smarty->fetch('step2.tpl');
 $page->render();
+?>
